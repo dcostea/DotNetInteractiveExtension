@@ -1,17 +1,11 @@
 ﻿// Copyright (c) .NET Foundation and contributors. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
-
 using System;
 using System.Collections.Generic;
-using System.CommandLine;
-using System.CommandLine.Invocation;
-using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Html;
 using Microsoft.DotNet.Interactive;
-using Microsoft.DotNet.Interactive.Commands;
-using Microsoft.DotNet.Interactive.Events;
 using Microsoft.DotNet.Interactive.Formatting;
 using static Microsoft.DotNet.Interactive.Formatting.PocketViewTags;
 
@@ -23,13 +17,13 @@ namespace Microsoft.Data.Analysis.Interactive
         {
             Formatter<DataFrame>.Register((df, writer) =>
             {
-                const int TAKE = 500;
-                const int SIZE = 20;
+                const int MAX = 10000;
+                const int SIZE = 10;
 
-                var uniqueId = $"table_{DateTime.Now.Ticks}";
+                var uniqueId = DateTime.Now.Ticks;
 
-                var maxMessage = df.Columns.Count > TAKE ? "| Showing a max of {TAKE} rows" : string.Empty;
-                var title = h3[style: "text-align: center;"]($"DataFrame ({df.Columns.Count} columns, {df.Rows.Count} rows) {maxMessage}");
+                var maxMessage = df.Rows.Count > MAX ? $" (showing a max of {MAX} rows!)" : string.Empty;
+                var title = h3[style: "text-align: center;"]($"DataFrame - {df.Rows.Count} rows {maxMessage}");
 
                 var header = new List<IHtmlContent>
                 {
@@ -38,8 +32,9 @@ namespace Microsoft.Data.Analysis.Interactive
                 header.AddRange(df.Columns.Select(c => (IHtmlContent)th(c.Name)));
 
                 // table body
+                var maxRows = Math.Min(MAX, df.Rows.Count);
                 var rows = new List<List<IHtmlContent>>();
-                for (var index = 0; index < Math.Min(TAKE, df.Rows.Count); index++)
+                for (var index = 0; index < Math.Min(MAX, df.Rows.Count); index++)
                 {
                     var cells = new List<IHtmlContent>
                     {
@@ -52,65 +47,85 @@ namespace Microsoft.Data.Analysis.Interactive
                     rows.Add(cells);
                 }
 
+                //navigator      
+                var footer = new List<IHtmlContent>();
                 BuildHideRowsScript(uniqueId);
 
-                var footer = new List<IHtmlContent>();
-                footer.Add(b[style: "margin: 2px;"]("Page"));
-                for (var page = 0; page < TAKE / SIZE; page++)
+                if (df.Rows.Count > SIZE)
                 {
-                    var paginateScript = BuildHideRowsScript(uniqueId) + BuildPageScript(page, SIZE, uniqueId);
-                    footer.Add(button[style: "margin: 2px;", onclick: paginateScript](page));
+                    var paginateScriptFirst = BuildHideRowsScript(uniqueId) + GotoPageIndex(uniqueId, 0) + BuildPageScript(uniqueId, SIZE);
+                    footer.Add(button[style: "margin: 2px;", onclick: paginateScriptFirst]("⏮"));
+
+                    var paginateScriptPrevTen = BuildHideRowsScript(uniqueId) + UpdatePageIndex(uniqueId, -10, (maxRows - 1) / SIZE) + BuildPageScript(uniqueId, SIZE);
+                    footer.Add(button[style: "margin: 2px;", onclick: paginateScriptPrevTen]("⏪"));
+
+                    var paginateScriptPrev = BuildHideRowsScript(uniqueId) + UpdatePageIndex(uniqueId, -1, (maxRows - 1) / SIZE) + BuildPageScript(uniqueId, SIZE);
+                    footer.Add(button[style: "margin: 2px;", onclick: paginateScriptPrev]("◀️"));
+
+                    footer.Add(b[style: "margin: 2px;"]("Page"));
+                    footer.Add(b[id: $"page_{uniqueId}", style: "margin: 2px;"]("1"));
+
+                    var paginateScriptNext = BuildHideRowsScript(uniqueId) + UpdatePageIndex(uniqueId, 1, (maxRows - 1) / SIZE) + BuildPageScript(uniqueId, SIZE);
+                    footer.Add(button[style: "margin: 2px;", onclick: paginateScriptNext]("▶️"));
+
+                    var paginateScriptNextTen = BuildHideRowsScript(uniqueId) + UpdatePageIndex(uniqueId, 10, (maxRows - 1) / SIZE) + BuildPageScript(uniqueId, SIZE);
+                    footer.Add(button[style: "margin: 2px;", onclick: paginateScriptNextTen]("⏩"));
+
+                    var paginateScriptLast = BuildHideRowsScript(uniqueId) + GotoPageIndex(uniqueId, (maxRows - 1) / SIZE) + BuildPageScript(uniqueId, SIZE);
+                    footer.Add(button[style: "margin: 2px;", onclick: paginateScriptLast]("⏭️"));
+                }
+                else
+                {
+                    BuildHideRowsScript(uniqueId);
+                    footer.Add(b[style: "margin: 2px;"]("Page"));
+                    footer.Add(b[id: $"page_{uniqueId}", style: "margin: 2px;"]("0"));
                 }
 
                 //table
-                var t = table[id: $"{uniqueId}"](
+                var t = table[id: $"table_{uniqueId}"](
                     caption(title),
                     thead(tr(header)),
                     tbody(rows.Select(r => tr[style: "display: none"](r))),
-                    tfoot(tr(td[colspan: df.Columns.Count + 1](footer)))
+                    tfoot(tr(td[colspan: df.Columns.Count + 1, style: "text-align: center;"](footer)))
                 );
                 writer.Write(t);
 
                 //show first page
-                writer.Write($"<script>{BuildPageScript(0, SIZE, uniqueId)}</script>");
+                writer.Write($"<script>{BuildPageScript(uniqueId, SIZE)}</script>");
 
             }, "text/html");
 
-            var kernelBase = kernel as KernelBase;
-
-            var directive = new Command("#!doit")
-            {
-                Handler = CommandHandler.Create(async (FileInfo csv, string typeName, KernelInvocationContext context) =>
-                {
-                    // do the job
-                    var command = new SubmitCode(@$"public class {typeName}{{}}");
-                    context.Publish(new DisplayedValueProduced($"emitting {typeName} from {csv.FullName}", context.Command));
-                    await context.HandlingKernel.SendAsync(command);
-                })
-            };
-
-            directive.AddOption(new Option<FileInfo>(
-                "csv").ExistingOnly());
-
-            directive.AddOption(new Option<string>(
-                "typeName",
-                getDefaultValue: () => "Foo"));
-
-            kernelBase.AddDirective(directive);
-
             return Task.CompletedTask;
 
-            static string BuildPageScript(int page, int size, string uniqueId)
+
+            static string BuildHideRowsScript(long uniqueId)
             {
-                var script = $"var pageRows = document.querySelectorAll('#{uniqueId} tbody tr:nth-child(n+{page * size + 1})'); ";
-                script += $"for (var j = 0; j < {size}; j++) {{ pageRows[j].style.display='table-row'; }}";
+                var script = $"var allRows = document.querySelectorAll('#table_{uniqueId} tbody tr:nth-child(n)'); ";
+                script += "for (var i = 0; i < allRows.length; i++) { allRows[i].style.display='none'; } ";
                 return script;
             }
 
-            static string BuildHideRowsScript(string uniqueId)
+            static string BuildPageScript(long uniqueId, int size)
             {
-                var script = $"var allRows = document.querySelectorAll('#{uniqueId} tbody tr:nth-child(n)'); ";
-                script += "for (var i = 0; i < allRows.length; i++) { allRows[i].style.display='none'; } ";
+                var script = $"var page = parseInt(document.querySelector('#page_{uniqueId}').innerHTML) - 1; ";
+                script += $"var pageRows = document.querySelectorAll(`#table_{uniqueId} tbody tr:nth-child(n + ${{page * {size} + 1 }})`); ";
+                script += $"for (var j = 0; j < {size}; j++) {{ pageRows[j].style.display='table-row'; }} ";
+                return script;
+            }
+
+            static string GotoPageIndex(long uniqueId, long page)
+            {
+                var script = $"document.querySelector('#page_{uniqueId}').innerHTML = {page + 1}; ";
+                return script;
+            }
+
+            static string UpdatePageIndex(long uniqueId, int step, long maxPage)
+            {
+                var script = $"var page = parseInt(document.querySelector('#page_{uniqueId}').innerHTML) - 1; ";
+                script += $"page = parseInt(page) + parseInt({step}); ";
+                script += $"page = page < 0 ? 0 : page; ";
+                script += $"page = page > {maxPage} ? {maxPage} : page; ";
+                script += $"document.querySelector('#page_{uniqueId}').innerHTML = page + 1; ";
                 return script;
             }
         }
